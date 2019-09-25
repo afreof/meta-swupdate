@@ -4,6 +4,7 @@ INSANE_SKIP_${PN}-tools = "ldflags"
 
 FILES_${PN}-tools = "${bindir}/swupdate-client \
                     ${bindir}/swupdate-progress \
+                    ${systemd_system_unitdir}/swupdate-progress.service \
                     ${bindir}/swupdate-hawkbitcfg \
                     ${bindir}/swupdate-sendtohawkbit"
 
@@ -22,3 +23,6 @@ do_install_append () {
   install -m 0755 tools/sendtohawkbit_unstripped ${D}${bindir}/swupdate-sendtohawkbit
 
 }
+
+SYSTEMD_PACKAGES_append = " ${PN}-tools"
+SYSTEMD_SERVICE_${PN}-tools = "swupdate-progress.service"
