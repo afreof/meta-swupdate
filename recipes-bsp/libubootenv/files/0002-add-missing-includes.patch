@@ -1,0 +1,27 @@
+From 9172da86e35226fc98e4f26b8d5d1e7e002c343f Mon Sep 17 00:00:00 2001
+From: Adrian Freihofer <adrian.freihofer@siemens.com>
+Date: Mon, 23 Sep 2019 07:52:29 +0200
+Subject: [PATCH 2/3] add missing includes
+
+Signed-off-by: Adrian Freihofer <adrian.freihofer@siemens.com>
+---
+ src/uboot_private.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/uboot_private.h b/src/uboot_private.h
+index e332283..4b7a9f9 100644
+--- a/src/uboot_private.h
++++ b/src/uboot_private.h
+@@ -8,7 +8,9 @@
+ #pragma once
+ 
+ #include <stdbool.h>
++#include <stdint.h>
+ #include <sys/queue.h>
++#include <mtd/mtd-user.h>
+ #include "libuboot.h"
+ 
+ typedef enum {
+-- 
+2.11.0
+

@@ -1,0 +1,325 @@
+From acf3d9bca35decf3520b4aee86a14f2ce0b6fa24 Mon Sep 17 00:00:00 2001
+From: Adrian Freihofer <adrian.freihofer@siemens.com>
+Date: Mon, 23 Sep 2019 07:50:34 +0200
+Subject: [PATCH 3/3] handle protected mmcblk_boot_ devices
+
+Some block devices support physical write protection. The kernel
+provides a default interface to enable or disable protection in
+/sys/class/block/*/force_ro.
+
+This patch adds functionality to automatically detect these memory
+types. If read-only mode is enabled on the partition on which the
+uboot environment must be written, libubootenv temporarily switches
+to read/write mode.
+
+The implementation should be generic enough to add support for
+other device types with differently implemented write protection
+later. This is the motivation for object-oriented design.
+
+Signed-off-by: Adrian Freihofer <adrian.freihofer@siemens.com>
+---
+ src/CMakeLists.txt        |   1 +
+ src/uboot_env.c           |  32 +++++++++
+ src/uboot_env_unprotect.c | 165 ++++++++++++++++++++++++++++++++++++++++++++++
+ src/uboot_env_unprotect.h |  11 ++++
+ src/uboot_private.h       |   3 +
+ 5 files changed, 212 insertions(+)
+ create mode 100644 src/uboot_env_unprotect.c
+ create mode 100644 src/uboot_env_unprotect.h
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 051732b..0672d5e 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -2,6 +2,7 @@ cmake_minimum_required (VERSION 2.6)
+ # Sources and private headers
+ SET(libubootenv_SOURCES
+   uboot_env.c
++  uboot_env_unprotect.c
+   uboot_private.h
+ )
+ 
+diff --git a/src/uboot_env.c b/src/uboot_env.c
+index 726c433..21d9694 100644
+--- a/src/uboot_env.c
++++ b/src/uboot_env.c
+@@ -600,6 +600,11 @@ static int devwrite(struct uboot_ctx *ctx, unsigned int copy, void *data)
+ 
+ 	dev = &ctx->envdevs[copy];
+ 
++	// remove hardware write protection if needed
++	if (dev->prot_handler) {
++		env_unprotect(dev->prot_handler);
++	}
++
+ 	dev->fd = open(dev->devname, O_RDWR);
+ 	if (dev->fd < 0)
+ 		return -EBADF;
+@@ -619,8 +624,15 @@ static int devwrite(struct uboot_ctx *ctx, unsigned int copy, void *data)
+ 		break;
+ 	};
+ 
++	// ensure all data are written before we might enable the read-only flag on the environment
++	fsync(dev->fd);
+ 	close(dev->fd);
+ 
++	// enforce hardware write protection again if it was active before this write
++	if (dev->prot_handler) {
++		env_reprotect(dev->prot_handler);
++	}
++
+ 	return ret;
+ }
+ 
+@@ -792,6 +804,12 @@ static int libuboot_load(struct uboot_ctx *ctx)
+ 		crcenv[i] = dev->crc == crc;
+ 		if (ctx->redundant)
+ 			dev->flags = *(uint8_t *)(buf[i] + offsetflags);
++
++		ret = env_protect_probe(&(dev->prot_handler), dev->devname);
++		if(ret < 0) {
++			free(buf[0]);
++			return ret;
++		}
+ 	}
+ 	if (!ctx->redundant) {
+ 		ctx->current = 0;
+@@ -1225,6 +1243,19 @@ int libuboot_configure(struct uboot_ctx *ctx,
+ 	return 0;
+ }
+ 
++void libuboot_unconfigure(struct uboot_ctx *ctx) {
++	struct uboot_flash_env *dev;
++	int i;
++	for (i = 0; i < 2; i++) {
++		dev = &ctx->envdevs[i];
++		if (!dev)
++			break;
++		if (dev->prot_handler) {
++			free(dev->prot_handler);
++		}
++	}
++}
++
+ int libuboot_initialize(struct uboot_ctx **out,
+ 			struct uboot_env_device *envdevs) {
+ 	struct uboot_ctx *ctx;
+@@ -1273,5 +1304,6 @@ void libuboot_close(struct uboot_ctx *ctx) {
+ }
+ 
+ void libuboot_exit(struct uboot_ctx *ctx) {
++	libuboot_unconfigure(ctx);
+ 	free(ctx);
+ }
+diff --git a/src/uboot_env_unprotect.c b/src/uboot_env_unprotect.c
+new file mode 100644
+index 0000000..db61797
+--- /dev/null
++++ b/src/uboot_env_unprotect.c
+@@ -0,0 +1,165 @@
++/*
++ * SPDX-License-Identifier:     LGPL-2.1-or-later
++ *
++ * For some hardware types, the uboot environment variables are stored in a
++ * read-only memory area. How this memory area can be switched to a writable
++ * mode depends on the hardware. This file provides three functions:
++ *  - env_protect_probe
++ *  - env_unprotect
++ *  - env_reprotect
++ * The probe function internally calls various hardware specific probe
++ * functions until an implementation that matches the hardware in use returns
++ * an env_protect_t object. The env_protect_t object provides two function
++ * pointers which point to the hardware matching implementation. This allows
++ * to use polyporhism to deal with many hardware specific implementations.
++ *
++ * The reprotect function does not enable write protection if the memory
++ * was not protected before the unprotect function was called.
++ */
++
++#include <stdlib.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <string.h>
++#include <stdio.h>
++#include <errno.h>
++#include "uboot_private.h"
++#include "uboot_env_unprotect.h"
++
++typedef void (*fp_unprotect)(env_protect_t*);
++typedef void (*fp_reprotect)(env_protect_t*);
++
++typedef struct env_protect {
++	fp_unprotect unprotect;
++	fp_reprotect reprotect;
++} env_protect_t;
++
++#define SYSFS_PATH_MAX 120
++
++
++
++static const char c_sys_path_1[] = "/sys/class/block/";
++static const char c_sys_path_2[] = "/force_ro";
++static const char c_dev_name_1[] = "mmcblk";
++static const char c_dev_name_2[] = "boot";
++
++/** mmcblk_boot device specific class inherited from generic env_protect_t */
++typedef struct env_protect_mmcblkboot {
++	env_protect_t parent;  // must be first, means derived from env_protect_t
++	char sysfs_path[SYSFS_PATH_MAX];
++	char current_prot;
++} env_protect_mmcblkboot_t;
++
++/** mmcblk_boot device specific unprotect implementation */
++static void mmcblkboot_unprotect(env_protect_t *p_obj) {
++	const char c_unprot_char = '0';
++	const char c_prot_char = '1';
++	env_protect_mmcblkboot_t *p_obj_casted = (env_protect_mmcblkboot_t *)p_obj;
++	int fd;
++	ssize_t n;
++
++	fd = open(p_obj_casted->sysfs_path, O_RDWR);
++	if (fd == -1) {
++		return;
++	}
++
++	// Verify and archive the current write protect state, unprotect the device
++	n = read(fd, &(p_obj_casted->current_prot), 1);
++	if (n == 1 && (p_obj_casted->current_prot == c_unprot_char || p_obj_casted->current_prot == c_prot_char)) {
++		write(fd, &c_unprot_char, 1);
++	} else {
++		p_obj_casted->current_prot = 0; // undefined state
++	}
++	close(fd);
++}
++
++/** mmcblk_boot device specific protect implementation */
++static void mmcblkboot_reprotect(env_protect_t *p_obj) {
++	env_protect_mmcblkboot_t *p_obj_casted = (env_protect_mmcblkboot_t *)p_obj;
++	int fd;
++
++	if (p_obj_casted->current_prot != 0) {
++		fd = open(p_obj_casted->sysfs_path, O_WRONLY);
++		if (fd == -1) {
++			return;
++		}
++
++		write(fd, &(p_obj_casted->current_prot), 1);
++		close(fd);
++	}
++}
++
++/**
++ * mmcblk_boot device specific constructor
++ *
++ * Gets active if:
++ * - devname matches /dev/mmcblk[0-9]boot[0-9]
++ * - if a corresponding sysfs entry "force_ro" exists
++ */
++static int mmcblkboot_create(env_protect_t **pp_obj, const char *devname) {
++	env_protect_mmcblkboot_t *p_obj = NULL;
++	const char *devfile = devname;
++	int ret;
++
++	if (strncmp("/dev/", devname, 5) == 0) {
++		devfile = devname + 5;
++	} else {
++		return 0;
++	}
++
++	ret = strncmp(devfile, c_dev_name_1, sizeof(c_dev_name_1) - 1);
++	if (ret != 0) {
++		return 0;
++	}
++
++	if (strncmp(devfile + sizeof(c_dev_name_1), c_dev_name_2, sizeof(c_dev_name_2) - 1) != 0) {
++		return 0;
++	}
++
++	if (*(devfile + sizeof(c_dev_name_1) - 1) < '0' ||
++	    *(devfile + sizeof(c_dev_name_1) - 1) > '9') {
++		return 0;
++	}
++
++	if (*(devfile + sizeof(c_dev_name_1) + sizeof(c_dev_name_2) - 1) < '0' ||
++	    *(devfile + sizeof(c_dev_name_1) + sizeof(c_dev_name_2) - 1) > '9') {
++		return 0;
++	}
++
++	p_obj = (env_protect_mmcblkboot_t *)calloc(1, sizeof(env_protect_mmcblkboot_t));
++	if (p_obj == NULL) {
++		return -ENOMEM;
++	}
++	snprintf(p_obj->sysfs_path, SYSFS_PATH_MAX, "%s%s%s", c_sys_path_1, devfile, c_sys_path_2);
++
++	if (access(p_obj->sysfs_path, W_OK) == -1) {
++		free(p_obj);
++		return 0;
++	}
++
++	p_obj->parent.unprotect = mmcblkboot_unprotect;
++	p_obj->parent.reprotect = mmcblkboot_reprotect;
++
++	*pp_obj = (env_protect_t*)p_obj;
++	return 1;
++}
++
++
++
++int env_protect_probe(env_protect_t **pp_obj, const char *devname) {
++	int ret;
++	ret = mmcblkboot_create(pp_obj, devname);
++	return ret;
++}
++
++void env_unprotect(env_protect_t *p_obj) {
++	if (p_obj->unprotect) {
++		(p_obj->unprotect)(p_obj);
++	}
++}
++
++void env_reprotect(env_protect_t *p_obj) {
++	if (p_obj->reprotect) {
++		(p_obj->reprotect)(p_obj);
++	}
++}
+diff --git a/src/uboot_env_unprotect.h b/src/uboot_env_unprotect.h
+new file mode 100644
+index 0000000..5fd3b38
+--- /dev/null
++++ b/src/uboot_env_unprotect.h
+@@ -0,0 +1,11 @@
++/*
++ * SPDX-License-Identifier:     LGPL-2.1-or-later
++ */
++
++#pragma once
++
++typedef struct env_protect env_protect_t;
++
++int env_protect_probe(env_protect_t **pp_obj, const char *devname);
++void env_unprotect(env_protect_t *p_obj);
++void env_reprotect(env_protect_t *p_obj);
+diff --git a/src/uboot_private.h b/src/uboot_private.h
+index 4b7a9f9..fcfadc5 100644
+--- a/src/uboot_private.h
++++ b/src/uboot_private.h
+@@ -12,6 +12,7 @@
+ #include <sys/queue.h>
+ #include <mtd/mtd-user.h>
+ #include "libuboot.h"
++#include "uboot_env_unprotect.h"
+ 
+ typedef enum {
+ 	TYPE_ATTR_STRING,	/* default */
+@@ -87,6 +88,8 @@ struct uboot_flash_env {
+ 	enum flags_type		flagstype;
+ 	/** type of device (mtd, ubi, file, ....) */
+ 	enum device_type	device_type;
++	/** Optional flash protection handling */
++	env_protect_t		*prot_handler;
+ };
+ 
+ /** Internal structure for an environment variable
+-- 
+2.11.0
+
