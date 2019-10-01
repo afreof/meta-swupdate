@@ -1,0 +1,244 @@
+From 48dd6bd78344af9339e51f61e96f32bd20444461 Mon Sep 17 00:00:00 2001
+From: Adrian Freihofer <adrian.freihofer@siemens.com>
+Date: Wed, 25 Sep 2019 07:54:22 +0200
+Subject: [PATCH] systemd generic startup
+
+If SYSTEMD_SYSTEM_UNITDIR environment variable is passed to make
+install, a generic set of systemd service and socket files gets
+installed.
+
+For most projects starting swupdate requires some logic implemented
+in shell scripts. Therefore swupdate is started by a new shell
+script /usr/bin/swupdate-pre. swupdate-pre evaluates code snippets
+from /usr/lib/swupdate.d and /etc/swupdate.d before swupdate gets
+started. All modes (file, webserver, webclient) of swupdate are
+supported. Users or distro maintainers are enabled to add simple
+code snippets adding arguments for swupdate to the following three
+variables:
+- SWUPDATE_ARGS
+- SWUPDATE_WEBSERVER_ARGS
+- SWUPDATE_DOWNLOAD_ARGS
+
+This allows to provide a "just works" configuration for Mongoose
+if it gets compiled. This was not the case with systemd before.
+
+Signed-off-by: Adrian Freihofer <adrian.freihofer@siemens.com>
+---
+ Makefile                                       | 20 ++++++++++++++++++
+ doc/source/swupdate.rst                        | 29 +++++++++++++++-----------
+ startup/systemd/10-mongoose-args               |  1 +
+ startup/systemd/swupdate-pre                   | 28 +++++++++++++++++++++++++
+ startup/systemd/swupdate-progress.service      |  9 ++++++++
+ startup/systemd/swupdate-usb.rules             |  2 ++
+ startup/systemd/swupdate-usb@.service          |  8 +++++++
+ startup/systemd/swupdate.service               | 10 +++++++++
+ startup/systemd/swupdate.socket                | 11 ++++++++++
+ startup/systemd/systemd-tmpfiles-swupdate.conf |  3 +++
+ 10 files changed, 109 insertions(+), 12 deletions(-)
+ create mode 100644 startup/systemd/10-mongoose-args
+ create mode 100644 startup/systemd/swupdate-pre
+ create mode 100644 startup/systemd/swupdate-progress.service
+ create mode 100644 startup/systemd/swupdate-usb.rules
+ create mode 100644 startup/systemd/swupdate-usb@.service
+ create mode 100644 startup/systemd/swupdate.service
+ create mode 100644 startup/systemd/swupdate.socket
+ create mode 100644 startup/systemd/systemd-tmpfiles-swupdate.conf
+
+diff --git a/Makefile b/Makefile
+index d60c58e..e067009 100644
+--- a/Makefile
++++ b/Makefile
+@@ -461,6 +461,26 @@ install: all
+ 		install -d ${DESTDIR}/usr/lib/lua/$(LUAVER); \
+ 		install -m 0755 ${lua_swupdate} $(DESTDIR)/usr/lib/lua/$(LUAVER); \
+ 	fi
++	if [ "x${SYSTEMD_SYSTEM_UNITDIR}" != "x" ]; then \
++		install -d ${DESTDIR}${SYSTEMD_SYSTEM_UNITDIR}; \
++		install -d ${DESTDIR}/usr/lib/swupdate.d; \
++		install -m 755 startup/systemd/swupdate-pre ${DESTDIR}/usr/bin; \
++		install -m 644 startup/systemd/swupdate-progress.service ${DESTDIR}${SYSTEMD_SYSTEM_UNITDIR}; \
++		install -m 644 startup/systemd/swupdate-usb@.service ${DESTDIR}${SYSTEMD_SYSTEM_UNITDIR}; \
++		install -m 644 startup/systemd/swupdate.socket ${DESTDIR}${SYSTEMD_SYSTEM_UNITDIR}; \
++		ctrl_path=${CONFIG_SOCKET_CTRL_PATH}; progr_path=${CONFIG_SOCKET_PROGRESS_PATH}; \
++		sed -i -e "s,@@SOCKET_CTRL_PATH@@,$${ctrl_path},g" \
++			-e "s,@@SOCKET_PROGRESS_PATH@@,$${progr_path},g" \
++			${DESTDIR}${SYSTEMD_SYSTEM_UNITDIR}/swupdate.socket; \
++		install -m 644 startup/systemd/swupdate.service ${DESTDIR}${SYSTEMD_SYSTEM_UNITDIR}; \
++		install -d ${DESTDIR}/usr/lib/tmpfiles.d; \
++		install -m 0644 startup/systemd/systemd-tmpfiles-swupdate.conf ${DESTDIR}/usr/lib/tmpfiles.d/swupdate.conf; \
++		install -d ${DESTDIR}/etc/udev/rules.d; \
++		install -m 0644 startup/systemd/swupdate-usb.rules ${DESTDIR}/etc/udev/rules.d/; \
++		if [ "x$(CONFIG_MONGOOSE)" == "xy" ]; then \
++			install -m 644 startup/systemd/10-mongoose-args ${DESTDIR}/usr/lib/swupdate.d/; \
++		fi; \
++	fi
+ 
+ PHONY += run-tests
+ tests: \
+diff --git a/doc/source/swupdate.rst b/doc/source/swupdate.rst
+index 1ff08ef..ff7783e 100644
+--- a/doc/source/swupdate.rst
++++ b/doc/source/swupdate.rst
+@@ -520,22 +520,27 @@ configuration switch ``CONFIG_SYSTEMD``. If enabled, SWUpdate
+ signals systemd about start-up completion and can make optional
+ use of systemd's socket-based activation feature.
+ 
+-A sample systemd service unit file ``/etc/systemd/system/swupdate.service``
+-may look like the following starting SWUpdate in suricatta daemon mode:
++To install a generic set of service and socket files, pass the
++`SYSTEMD_SYSTEM_UNITDIR` parameter, which points to `/lib/systed/system`
++for example, to the "make install" command.
+ 
+-::
++For further runtime adjustments, some shell code snippets can be added
++to the `/usr/lib/swupdate.d` or `/etc/swupdate.d` folders. The
++code snippets are processed by a full-featured shell in alphabetical order.
++Files from /etc overwrite files from /usr/ with the same name.
+ 
+-	[Unit]
+-	Description=SWUpdate daemon
+-	Documentation=https://github.com/sbabic/swupdate
+-	Documentation=https://sbabic.github.io/swupdate
++The purpose of these code snippets is to assign reasonable command line
++parameters to swupdate. The following variables may be set:
+ 
+-	[Service]
+-	Type=notify
+-	ExecStart=/usr/bin/swupdate -u '-t default -u http://localhost -i 25'
++- SWUPDATE_ARGS
++- SWUPDATE_WEBSERVER_ARGS
++- SWUPDATE_DOWNLOAD_ARGS
+ 
+-	[Install]
+-	WantedBy=multi-user.target
++A sample configuration file ``/usr/lib/swupdate.d/10-suricatta``
++may look like the following starting SWUpdate in suricatta daemon mode:
++::
++
++	SWUPDATE_DOWNLOAD_ARGS='-t default -u http://localhost -i 25'
+ 
+ Started via ``systemctl start swupdate.service``, SWUpdate
+ (re)creates its sockets on startup. For using socket-based
+diff --git a/startup/systemd/10-mongoose-args b/startup/systemd/10-mongoose-args
+new file mode 100644
+index 0000000..896e66b
+--- /dev/null
++++ b/startup/systemd/10-mongoose-args
+@@ -0,0 +1 @@
++SWUPDATE_WEBSERVER_ARGS="-r /www ${SWUPDATE_MONGOOSE_EXTRA_ARGS:--p 8080}"
+diff --git a/startup/systemd/swupdate-pre b/startup/systemd/swupdate-pre
+new file mode 100644
+index 0000000..2d29a12
+--- /dev/null
++++ b/startup/systemd/swupdate-pre
+@@ -0,0 +1,28 @@
++#!/bin/sh
++
++# Override these variables in sourced script(s) located
++# in /usr/lib/swupdate.d or /etc/swupdate.d
++SWUPDATE_ARGS="-v ${SWUPDATE_EXTRA_ARGS}"
++SWUPDATE_WEBSERVER_ARGS=""
++SWUPDATE_DOWNLOAD_ARGS=""
++
++# source all files from /etc/swupdate.d and /usr/lib/swupdate.d/
++# A file found in /etc replaces the same file in /usr
++for f in `(test -d /usr/lib/swupdate.d/ && ls -1 /usr/lib/swupdate.d/; test -d /etc/swupdate.d && ls -1 /etc/swupdate.d) | sort -u`; do
++  if [ -f /etc/swupdate.d/$f ]; then
++    . /etc/swupdate.d/$f
++  else
++    . /usr/lib/swupdate.d/$f
++  fi
++done
++
++#  handle variable escaping in a simmple way. Use exec to forward open filedescriptors from systemd open.
++if [ "$SWUPDATE_WEBSERVER_ARGS" != "" -a  "$SWUPDATE_DOWNLOAD_ARGS" != "" ]; then
++  exec /usr/bin/swupdate $SWUPDATE_ARGS -w "$SWUPDATE_WEBSERVER_ARGS" -u "$SWUPDATE_DOWNLOAD_ARGS"
++elif [ "$SWUPDATE_WEBSERVER_ARGS" != "" ]; then
++  exec /usr/bin/swupdate $SWUPDATE_ARGS -w "$SWUPDATE_WEBSERVER_ARGS"
++elif [ "$SWUPDATE_DOWNLOAD_ARGS" != "" ]; then
++  exec /usr/bin/swupdate $SWUPDATE_ARGS -d "$SWUPDATE_DOWNLOAD_ARGS"
++else
++  exec /usr/bin/swupdate $SWUPDATE_ARGS
++fi
+diff --git a/startup/systemd/swupdate-progress.service b/startup/systemd/swupdate-progress.service
+new file mode 100644
+index 0000000..212d151
+--- /dev/null
++++ b/startup/systemd/swupdate-progress.service
+@@ -0,0 +1,9 @@
++[Unit]
++Description=swupdate progress service
++Before=swupdate.service
++
++[Service]
++ExecStart=/usr/bin/swupdate-progress -r -w
++
++[Install]
++WantedBy=swupdate.service
+diff --git a/startup/systemd/swupdate-usb.rules b/startup/systemd/swupdate-usb.rules
+new file mode 100644
+index 0000000..7bba227
+--- /dev/null
++++ b/startup/systemd/swupdate-usb.rules
+@@ -0,0 +1,2 @@
++ACTION=="add", KERNEL=="sd*", SUBSYSTEM=="block", ENV{ID_FS_USAGE}=="filesystem", TAG+="systemd", ENV{SYSTEMD_WANTS}+="swupdate-usb@%k.service"
++
+diff --git a/startup/systemd/swupdate-usb@.service b/startup/systemd/swupdate-usb@.service
+new file mode 100644
+index 0000000..eda9d15
+--- /dev/null
++++ b/startup/systemd/swupdate-usb@.service
+@@ -0,0 +1,8 @@
++[Unit]
++Description=usb media swupdate service
++Requires=swupdate-progress.service
++
++[Service]
++ExecStartPre=/bin/mount /dev/%I /mnt
++ExecStart=/bin/sh -c "swupdate-client -v /mnt/*.swu"
++ExecStopPost=/bin/umount /mnt
+diff --git a/startup/systemd/swupdate.service b/startup/systemd/swupdate.service
+new file mode 100644
+index 0000000..a96617a
+--- /dev/null
++++ b/startup/systemd/swupdate.service
+@@ -0,0 +1,10 @@
++[Unit]
++Description=SWUpdate daemon
++Documentation=https://github.com/sbabic/swupdate
++Documentation=https://sbabic.github.io/swupdate
++
++[Service]
++ExecStart=/usr/bin/swupdate-pre
++
++[Install]
++WantedBy=multi-user.target
+diff --git a/startup/systemd/swupdate.socket b/startup/systemd/swupdate.socket
+new file mode 100644
+index 0000000..aeb7310
+--- /dev/null
++++ b/startup/systemd/swupdate.socket
+@@ -0,0 +1,11 @@
++[Unit]
++Description=SWUpdate socket listener
++Documentation=https://github.com/sbabic/swupdate
++Documentation=https://sbabic.github.io/swupdate
++
++[Socket]
++ListenStream=@@SOCKET_CTRL_PATH@@
++ListenStream=@@SOCKET_PROGRESS_PATH@@
++
++[Install]
++WantedBy=sockets.target
+diff --git a/startup/systemd/systemd-tmpfiles-swupdate.conf b/startup/systemd/systemd-tmpfiles-swupdate.conf
+new file mode 100644
+index 0000000..b374ddc
+--- /dev/null
++++ b/startup/systemd/systemd-tmpfiles-swupdate.conf
+@@ -0,0 +1,3 @@
++X /tmp/datadst
++X /tmp/scripts
++X /tmp/swupdate.env
+-- 
+2.11.0
+
