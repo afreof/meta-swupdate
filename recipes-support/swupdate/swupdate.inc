@@ -12,13 +12,21 @@ SRC_URI = "git://github.com/sbabic/swupdate.git;protocol=https \
      file://swupdate \
      "
 
+PACKAGES =+ "${PN}-www ${PN}-lua ${PN}-tools"
 INSANE_SKIP_${PN} = "ldflags"
-PACKAGES =+ "${PN}-www ${PN}-lua"
+INSANE_SKIP_${PN}-tools = "ldflags"
 
 FILES_${PN}-lua += "${libdir}/lua/"
 FILES_${PN}-www = " \
     ${libdir}/swupdate/conf.d/*mongoose* \
     /www/* \
+"
+FILES_${PN}-tools = " \
+    ${bindir}/swupdate-client \
+    ${bindir}/swupdate-progress \
+    ${systemd_system_unitdir}/swupdate-progress.service \
+    ${bindir}/swupdate-hawkbitcfg \
+    ${bindir}/swupdate-sendtohawkbit \
 "
 FILES_${PN} += " \
     ${libdir}/tmpfiles.d \
@@ -130,10 +138,7 @@ do_configure () {
 
 do_compile() {
   unset LDFLAGS
-  oe_runmake swupdate_unstripped progress_unstripped
-  cp swupdate_unstripped swupdate
-  cp progress_unstripped progress
-
+  oe_runmake
 }
 
 do_install () {
@@ -158,3 +163,6 @@ SYSTEMD_SERVICE_${PN} = " \
     swupdate.service \
     swupdate-usb@.service \
     "
+
+SYSTEMD_PACKAGES_append = " ${PN}-tools"
+SYSTEMD_SERVICE_${PN}-tools = "swupdate-progress.service"
