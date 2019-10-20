@@ -24,6 +24,8 @@ FILES_${PN}-lua += "${libdir}/lua/"
 FILES_${PN}-www = "/www/*"
 FILES_${PN} += "${libdir}/tmpfiles.d"
 
+RDEPENDS_${PN}-www += "${PN}-tools"
+
 S = "${WORKDIR}/git/"
 
 EXTRA_OEMAKE += " HOSTCC="${BUILD_CC}" HOSTCXX="${BUILD_CXX}" LD="${CC}" DESTDIR="${D}" V=1 ARCH=${TARGET_ARCH} CROSS_COMPILE=${TARGET_PREFIX} SKIP_STRIP=y"
