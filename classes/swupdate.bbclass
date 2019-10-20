@@ -90,9 +90,20 @@ python do_swuimage () {
     shutil.copyfile(os.path.join(workdir, "sw-description"), os.path.join(s, "sw-description"))
     fetch = bb.fetch2.Fetch([], d)
     list_for_cpio = ["sw-description"]
+    list_for_cpio_scripts = []  # scripts: pre-scripts must arive before streamed images
+    list_for_cpio_images = []
 
     if d.getVar('SWUPDATE_SIGNING', True):
         list_for_cpio.append('sw-description.sig')
+
+    def is_script(filename):
+        try:
+            with open(filename, 'r') as fh:
+                if fh.read(2) == '#!':
+                    return True
+        except UnicodeDecodeError:
+            pass
+        return False
 
     # Add files listed in SRC_URI to the swu file
     for url in fetch.urls:
@@ -100,7 +111,10 @@ python do_swuimage () {
         filename = os.path.basename(local)
         if (filename != 'sw-description'):
             shutil.copyfile(local, os.path.join(s, "%s" % filename ))
-            list_for_cpio.append(filename)
+            if is_script(local):
+                list_for_cpio_scripts.append(filename)
+            else:
+                list_for_cpio_images.append(filename)
 
     def add_image_to_swu(deploydir, imagename, s):
         src = os.path.join(deploydir, imagename)
@@ -109,7 +123,10 @@ python do_swuimage () {
         target_imagename = os.path.basename(imagename)  # allow images in subfolders of DEPLOY_DIR_IMAGE
         dst = os.path.join(s, target_imagename)
         shutil.copyfile(src, dst)
-        list_for_cpio.append(target_imagename)
+        if is_script(dst):
+            list_for_cpio_scripts.append(target_imagename)
+        else:
+            list_for_cpio_images.append(target_imagename)
         return True
 
     # Search for images listed in SWUPDATE_IMAGES in the DEPLOY directory.
@@ -136,6 +153,8 @@ python do_swuimage () {
         else:  # Allow also complete entries like "image.ext4.gz" in SWUPDATE_IMAGES
             if not add_image_to_swu(deploydir, image, s):
                 bb.fatal("swupdate cannot find %s image file" % image)
+
+    list_for_cpio = list_for_cpio + list_for_cpio_scripts + list_for_cpio_images
 
     prepare_sw_description(d, s, list_for_cpio)
 
