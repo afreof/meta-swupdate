@@ -10,25 +10,30 @@ inherit cml1 update-rc.d systemd pkgconfig
 SRC_URI = "git://github.com/sbabic/swupdate.git;protocol=https \
      file://defconfig \
      file://swupdate \
-     file://swupdate.service \
-     file://swupdate-usb.rules \
-     file://swupdate-usb@.service \
-     file://swupdate-progress.service \
-     file://systemd-tmpfiles-swupdate.conf \
      "
 
 INSANE_SKIP_${PN} = "ldflags"
 PACKAGES =+ "${PN}-www ${PN}-lua"
 
 FILES_${PN}-lua += "${libdir}/lua/"
-FILES_${PN}-www = "/www/*"
-FILES_${PN} += "${libdir}/tmpfiles.d"
+FILES_${PN}-www = " \
+    ${libdir}/swupdate/conf.d/*mongoose* \
+    /www/* \
+"
+FILES_${PN} += " \
+    ${libdir}/tmpfiles.d \
+    ${libdir}/swupdate/* \
+    ${systemd_system_unitdir}/swupdate.socket \
+    ${systemd_system_unitdir}/swupdate.service \
+    ${systemd_system_unitdir}/swupdate-usb@.service \
+"
 
 RDEPENDS_${PN}-www += "${PN}-tools"
 
 S = "${WORKDIR}/git/"
 
-EXTRA_OEMAKE += " HOSTCC="${BUILD_CC}" HOSTCXX="${BUILD_CXX}" LD="${CC}" DESTDIR="${D}" V=1 ARCH=${TARGET_ARCH} CROSS_COMPILE=${TARGET_PREFIX} SKIP_STRIP=y"
+EXTRA_OEMAKE += " HOSTCC="${BUILD_CC}" HOSTCXX="${BUILD_CXX}" LD="${CC}" DESTDIR="${D}" V=1 ARCH=${TARGET_ARCH} CROSS_COMPILE=${TARGET_PREFIX} SKIP_STRIP=y \
+  ${@bb.utils.contains('DISTRO_FEATURES', 'systemd', 'SYSTEMD_SYSTEM_UNITDIR=${systemd_system_unitdir}', '', d)}"
 
 DEPENDS += "kern-tools-native"
 
@@ -144,23 +149,12 @@ do_install () {
 
   install -d ${D}${sysconfdir}/init.d
   install -m 755 ${WORKDIR}/swupdate ${D}${sysconfdir}/init.d
-
-  install -d ${D}${systemd_unitdir}/system
-  install -m 644 ${WORKDIR}/swupdate.service ${D}${systemd_unitdir}/system
-  install -m 644 ${WORKDIR}/swupdate-usb@.service ${D}${systemd_unitdir}/system
-  install -m 644 ${WORKDIR}/swupdate-progress.service ${D}${systemd_unitdir}/system
-
-
-  if ${@bb.utils.contains('DISTRO_FEATURES','systemd','true','false',d)}; then
-    install -d ${D}${libdir}/tmpfiles.d
-    install -m 0644 ${WORKDIR}/systemd-tmpfiles-swupdate.conf ${D}${libdir}/tmpfiles.d/swupdate.conf
-    install -d ${D}${sysconfdir}/udev/rules.d
-    install -m 0644 ${WORKDIR}/swupdate-usb.rules ${D}${sysconfdir}/udev/rules.d/
-  fi
 }
 
 INITSCRIPT_NAME = "swupdate"
 INITSCRIPT_PARAMS = "defaults 70"
 
-SYSTEMD_SERVICE_${PN} = "swupdate.service"
-SYSTEMD_SERVICE_${PN} += "swupdate-usb@.service swupdate-progress.service"
+SYSTEMD_SERVICE_${PN} = " \
+    swupdate.service \
+    swupdate-usb@.service \
+    "
